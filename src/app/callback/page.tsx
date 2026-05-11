@@ -3,13 +3,16 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
-import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { buildSquarePOSUrl } from "@/lib/square-pos";
+
+const STORAGE_KEY = "msa-kiosk-locked-amount";
+const AUTO_RELAUNCH_DELAY = 4000;
 
 function CallbackContent() {
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [details, setDetails] = useState<any>(null);
+  const [countdown, setCountdown] = useState(4);
 
   useEffect(() => {
     try {
@@ -19,10 +22,7 @@ function CallbackContent() {
       if (errorCode) {
         setStatus("error");
         setDetails({ errorCode, description: getErrorDescription(errorCode) });
-        return;
-      }
-
-      if (dataParam) {
+      } else if (dataParam) {
         const decoded = JSON.parse(atob(dataParam));
         if (decoded.status === "ok" || decoded.transaction_id) {
           setStatus("success");
@@ -39,13 +39,37 @@ function CallbackContent() {
       setStatus("success");
       setDetails({ note: "Returned from Square POS" });
     }
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (status === "loading") return;
+
+    const countdownInterval = setInterval(() => {
+      setCountdown((prev) => Math.max(0, prev - 1));
+    }, 1000);
 
     const timer = setTimeout(() => {
-      window.location.href = "/";
-    }, 6000);
+      relaunchOrGoHome();
+    }, AUTO_RELAUNCH_DELAY);
 
-    return () => clearTimeout(timer);
-  }, [searchParams]);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(countdownInterval);
+    };
+  }, [status]);
+
+  const relaunchOrGoHome = () => {
+    const lockedAmount = localStorage.getItem(STORAGE_KEY);
+    if (lockedAmount) {
+      const cents = parseInt(lockedAmount, 10);
+      const url = buildSquarePOSUrl(cents);
+      if (url) {
+        window.location.href = url;
+        return;
+      }
+    }
+    window.location.href = "/";
+  };
 
   if (status === "loading") {
     return (
@@ -68,16 +92,9 @@ function CallbackContent() {
           <p className="text-xl text-gray-300 mb-2">
             {details?.description || details?.errorCode || "Something went wrong"}
           </p>
-          <p className="text-gray-500 mb-8">Please try again</p>
-          <Link
-            href="/"
-            className="inline-flex items-center gap-2 px-8 py-4 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-semibold transition-all"
-          >
-            <ArrowLeft className="w-5 h-5" />
-            Back to Kiosk
-          </Link>
-          <p className="text-sm text-gray-600 mt-6 animate-pulse">
-            Returning automatically...
+          <p className="text-gray-500 mb-4">Retrying automatically...</p>
+          <p className="text-gray-600 text-sm animate-pulse">
+            Next payment in {countdown}s
           </p>
         </div>
       </div>
@@ -85,10 +102,7 @@ function CallbackContent() {
   }
 
   return (
-    <div
-      className="kiosk-mode min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-emerald-950 via-gray-900 to-gray-950 p-6 cursor-pointer"
-      onClick={() => (window.location.href = "/")}
-    >
+    <div className="kiosk-mode min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-emerald-950 via-gray-900 to-gray-950 p-6">
       <div className="text-center animate-slide-up">
         <div className="animate-checkmark inline-flex items-center justify-center w-28 h-28 rounded-full bg-emerald-500/20 border-4 border-emerald-400 mb-8">
           <svg className="w-14 h-14 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
@@ -97,14 +111,14 @@ function CallbackContent() {
         </div>
         <h1 className="text-5xl font-bold text-emerald-400 mb-4">Thank You!</h1>
         <p className="text-2xl text-white mb-2">Payment received</p>
-        <p className="text-gray-400 mb-8">JazakAllahu Khair for your support</p>
+        <p className="text-gray-400 mb-6">JazakAllahu Khair for your support</p>
         {details?.transaction_id && (
           <p className="text-sm text-gray-500 mb-4">
             Ref: {details.transaction_id.slice(0, 12)}...
           </p>
         )}
-        <p className="text-sm text-gray-600 mt-4 animate-pulse">
-          Tap anywhere or wait to continue
+        <p className="text-gray-600 text-sm animate-pulse">
+          Ready for next payment in {countdown}s
         </p>
       </div>
     </div>
@@ -118,7 +132,6 @@ function getErrorDescription(code: string): string {
     no_network: "No internet connection — check your network",
     unsupported_api_version: "Square app needs to be updated",
     no_result: "No payment result received",
-    customer_management_not_supported: "Feature not supported",
     not_logged_in: "Please log in to Square POS app",
     could_not_perform: "Could not process payment — try again",
     illegal_location_id: "Invalid Square location — check your settings",

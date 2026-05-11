@@ -1,122 +1,146 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { DollarSign, CreditCard, Shield, ArrowLeft } from "lucide-react";
-import PaymentFlow from "@/components/PaymentFlow";
+import { useState, useEffect, useRef } from "react";
+import { DollarSign, CreditCard, Shield, Lock, Unlock } from "lucide-react";
+import { launchSquarePOS } from "@/lib/square-pos";
 
-type AppState = "select" | "payment" | "success" | "error";
-
-function buildSquarePOSUrl(amountCents: number): string {
-  const appId = process.env.NEXT_PUBLIC_SQUARE_APPLICATION_ID!;
-  const callbackUrl = `${window.location.origin}/callback`;
-  const locationId = process.env.NEXT_PUBLIC_SQUARE_LOCATION_ID!;
-
-  const data = {
-    amount_money: {
-      amount: String(amountCents),
-      currency_code: "USD",
-    },
-    callback_url: callbackUrl,
-    client_id: appId,
-    version: "1.3",
-    notes: `MSA Payment - $${(amountCents / 100).toFixed(2)}`,
-    location_id: locationId,
-    options: {
-      supported_tender_types: ["CREDIT_CARD"],
-      auto_return: true,
-    },
-  };
-
-  const encoded = btoa(JSON.stringify(data));
-
-  const userAgent = navigator.userAgent.toLowerCase();
-  const isIOS = /iphone|ipad|ipod/.test(userAgent);
-  const isAndroid = /android/.test(userAgent);
-
-  if (isIOS) {
-    return `square-commerce-v1://payment/create?data=${encoded}`;
-  } else if (isAndroid) {
-    return `intent:#Intent;action=com.squareup.pos.action.CHARGE;package=com.squareup;S.browser_fallback_url=${encodeURIComponent(window.location.origin)};S.com.squareup.pos.WEB_CALLBACK_URI=${encodeURIComponent(callbackUrl)};S.com.squareup.pos.CLIENT_ID=${appId};S.com.squareup.pos.API_VERSION=v2.0;i.com.squareup.pos.TOTAL_AMOUNT=${amountCents};S.com.squareup.pos.CURRENCY_CODE=USD;S.com.squareup.pos.TENDER_TYPES=com.squareup.pos.TENDER_CARD;S.com.squareup.pos.NOTE=${encodeURIComponent(`MSA Payment - $${(amountCents / 100).toFixed(2)}`)};S.com.squareup.pos.LOCATION_ID=${locationId};end`;
-  }
-
-  return "";
-}
+const STORAGE_KEY = "msa-kiosk-locked-amount";
 
 export default function KioskPage() {
-  const [state, setState] = useState<AppState>("select");
-  const [selectedAmount, setSelectedAmount] = useState<number>(0);
-  const [paymentResult, setPaymentResult] = useState<any>(null);
-  const [errorMessage, setErrorMessage] = useState<string>("");
-  const [isMobile, setIsMobile] = useState(false);
+  const [lockedAmount, setLockedAmount] = useState<number | null>(null);
+  const [showUnlock, setShowUnlock] = useState(false);
+  const unlockTapCount = useRef(0);
+  const unlockTimer = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    const ua = navigator.userAgent.toLowerCase();
-    setIsMobile(/iphone|ipad|ipod|android/.test(ua));
-  }, []);
-
-  useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (state === "success" || state === "error") {
-      timer = setTimeout(() => {
-        resetToHome();
-      }, 8000);
-    }
-    return () => clearTimeout(timer);
-  }, [state]);
-
-  const resetToHome = () => {
-    setState("select");
-    setSelectedAmount(0);
-    setPaymentResult(null);
-    setErrorMessage("");
-  };
-
-  const handleAmountSelect = (cents: number) => {
-    setSelectedAmount(cents);
-
-    if (isMobile) {
-      const posUrl = buildSquarePOSUrl(cents);
-      if (posUrl) {
-        window.location.href = posUrl;
-        return;
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const cents = parseInt(saved, 10);
+      if (cents === 500 || cents === 1000) {
+        setLockedAmount(cents);
       }
     }
+  }, []);
 
-    setState("payment");
+  const lockAmount = (cents: number) => {
+    localStorage.setItem(STORAGE_KEY, String(cents));
+    setLockedAmount(cents);
+    launchSquarePOS(cents);
   };
 
-  const handlePaymentSuccess = (result: any) => {
-    setPaymentResult(result);
-    setState("success");
+  const unlockAmount = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    setLockedAmount(null);
+    setShowUnlock(false);
+    unlockTapCount.current = 0;
   };
 
-  const handlePaymentError = (message: string) => {
-    setErrorMessage(message);
-    setState("error");
+  const handleLockedScreenTap = () => {
+    unlockTapCount.current += 1;
+
+    if (unlockTimer.current) clearTimeout(unlockTimer.current);
+
+    if (unlockTapCount.current >= 5) {
+      setShowUnlock(true);
+      unlockTapCount.current = 0;
+      return;
+    }
+
+    unlockTimer.current = setTimeout(() => {
+      unlockTapCount.current = 0;
+    }, 3000);
+
+    launchSquarePOS(lockedAmount!);
   };
 
-  if (state === "success") {
-    return <SuccessScreen amount={selectedAmount} result={paymentResult} onReset={resetToHome} />;
-  }
+  if (lockedAmount) {
+    const dollars = lockedAmount / 100;
+    const isBlue = lockedAmount === 500;
 
-  if (state === "error") {
-    return <ErrorScreen message={errorMessage} onReset={resetToHome} />;
-  }
-
-  if (state === "payment") {
     return (
-      <PaymentFlow
-        amountCents={selectedAmount}
-        onSuccess={handlePaymentSuccess}
-        onError={handlePaymentError}
-        onCancel={resetToHome}
-      />
+      <div className="kiosk-mode min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 p-6 relative">
+        {showUnlock && (
+          <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-6">
+            <div className="bg-gray-900 rounded-2xl border border-white/10 p-8 max-w-sm w-full text-center">
+              <Unlock className="w-10 h-10 text-amber-400 mx-auto mb-4" />
+              <h2 className="text-2xl font-bold text-white mb-2">Unlock Kiosk?</h2>
+              <p className="text-gray-400 mb-6">
+                This will stop the ${dollars} auto-payment loop and return to amount selection.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowUnlock(false)}
+                  className="flex-1 py-3 rounded-xl bg-white/10 hover:bg-white/20 text-white font-medium transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={unlockAmount}
+                  className="flex-1 py-3 rounded-xl bg-red-600 hover:bg-red-500 text-white font-medium transition-all"
+                >
+                  Unlock
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="text-center">
+          <div className={`inline-flex items-center justify-center w-20 h-20 rounded-2xl mb-6 ${isBlue ? "bg-brand-600/20 border border-brand-500/30" : "bg-emerald-600/20 border border-emerald-500/30"}`}>
+            <Lock className={`w-10 h-10 ${isBlue ? "text-brand-400" : "text-emerald-400"}`} />
+          </div>
+
+          <h1 className="text-3xl font-bold text-white mb-2">
+            MSA Payment Kiosk
+          </h1>
+
+          <div className={`inline-block px-6 py-3 rounded-2xl mb-6 ${isBlue ? "bg-brand-600/20 border border-brand-500/30" : "bg-emerald-600/20 border border-emerald-500/30"}`}>
+            <span className={`text-lg font-semibold ${isBlue ? "text-brand-300" : "text-emerald-300"}`}>
+              Locked to ${dollars.toFixed(0)}
+            </span>
+          </div>
+
+          <button
+            onClick={handleLockedScreenTap}
+            className={`
+              pulse-glow block w-full max-w-xs mx-auto rounded-3xl p-12 shadow-2xl transition-all
+              active:scale-[0.97]
+              ${isBlue
+                ? "bg-gradient-to-br from-brand-600 to-brand-700 shadow-brand-500/25"
+                : "bg-gradient-to-br from-emerald-600 to-emerald-700 shadow-emerald-500/25"
+              }
+            `}
+          >
+            <div className="flex flex-col items-center gap-4">
+              <CreditCard className="w-16 h-16 text-white/80" />
+              <span className="text-5xl font-extrabold text-white">
+                ${dollars.toFixed(0)}
+              </span>
+              <span className="text-xl font-medium text-white/70">
+                Tap Here to Charge
+              </span>
+            </div>
+          </button>
+
+          <p className="text-gray-500 text-sm mt-8">
+            Each tap opens Square POS with ${dollars.toFixed(0)} ready
+          </p>
+          <p className="text-gray-700 text-xs mt-2">
+            Tap 5x rapidly to unlock
+          </p>
+        </div>
+
+        <a
+          href="/admin"
+          className="fixed bottom-4 right-4 w-8 h-8 opacity-0 hover:opacity-20 transition-opacity"
+          aria-label="Admin"
+        />
+      </div>
     );
   }
 
   return (
     <div className="kiosk-mode min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 p-6">
-      {/* Header */}
       <div className="text-center mb-12">
         <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-brand-600/20 border border-brand-500/30 mb-6">
           <Shield className="w-10 h-10 text-brand-400" />
@@ -125,45 +149,23 @@ export default function KioskPage() {
           MSA Payments
         </h1>
         <p className="text-xl text-gray-400">
-          Tap an amount to get started
+          Select an amount to lock this kiosk
+        </p>
+        <p className="text-sm text-gray-500 mt-2">
+          Once locked, it auto-repeats that amount for every payment
         </p>
       </div>
 
-      {/* Amount Buttons */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 w-full max-w-lg mb-12">
-        <AmountButton
-          amount={5}
-          cents={500}
-          onSelect={handleAmountSelect}
-          color="blue"
-        />
-        <AmountButton
-          amount={10}
-          cents={1000}
-          onSelect={handleAmountSelect}
-          color="emerald"
-        />
+        <AmountButton amount={5} cents={500} onSelect={lockAmount} color="blue" />
+        <AmountButton amount={10} cents={1000} onSelect={lockAmount} color="emerald" />
       </div>
 
-      {/* Footer */}
-      <div className="flex flex-col items-center gap-3">
-        {isMobile ? (
-          <div className="flex items-center gap-2 text-emerald-400 text-sm">
-            <CreditCard className="w-4 h-4" />
-            <span>Tap amount → opens reader → customer taps card</span>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 text-gray-400 text-sm">
-            <CreditCard className="w-4 h-4" />
-            <span>Tap amount → enter card details online</span>
-          </div>
-        )}
-        <div className="flex items-center gap-2 text-gray-600 text-sm">
-          <span>Powered by Square</span>
-        </div>
+      <div className="flex items-center gap-2 text-gray-500 text-sm">
+        <CreditCard className="w-4 h-4" />
+        <span>Powered by Square</span>
       </div>
 
-      {/* Hidden admin link */}
       <a
         href="/admin"
         className="fixed bottom-4 right-4 w-8 h-8 opacity-0 hover:opacity-20 transition-opacity"
@@ -221,92 +223,11 @@ function AmountButton({
           ${amount}
         </span>
         <span className="text-lg font-medium text-white/70">
-          Tap to Pay
+          Lock &amp; Start
         </span>
       </div>
 
-      {/* Shine effect */}
       <div className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 bg-gradient-to-r from-transparent via-white/10 to-transparent" />
     </button>
-  );
-}
-
-function SuccessScreen({
-  amount,
-  result,
-  onReset,
-}: {
-  amount: number;
-  result: any;
-  onReset: () => void;
-}) {
-  return (
-    <div
-      className="kiosk-mode min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-emerald-950 via-gray-900 to-gray-950 p-6 cursor-pointer"
-      onClick={onReset}
-    >
-      <div className="text-center animate-slide-up">
-        <div className="animate-checkmark inline-flex items-center justify-center w-28 h-28 rounded-full bg-emerald-500/20 border-4 border-emerald-400 mb-8">
-          <svg className="w-14 h-14 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-          </svg>
-        </div>
-        <h1 className="text-5xl font-bold text-emerald-400 mb-4">
-          Thank You!
-        </h1>
-        <p className="text-2xl text-white mb-2">
-          Payment of <span className="font-bold">${(amount / 100).toFixed(2)}</span> received
-        </p>
-        <p className="text-gray-400 mb-8">
-          JazakAllahu Khair for your support
-        </p>
-        {result?.payment?.receiptUrl && (
-          <p className="text-sm text-gray-500">
-            Receipt available at checkout
-          </p>
-        )}
-        <p className="text-sm text-gray-600 mt-8 animate-pulse">
-          Tap anywhere to continue
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function ErrorScreen({
-  message,
-  onReset,
-}: {
-  message: string;
-  onReset: () => void;
-}) {
-  return (
-    <div
-      className="kiosk-mode min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-red-950 via-gray-900 to-gray-950 p-6 cursor-pointer"
-      onClick={onReset}
-    >
-      <div className="text-center animate-slide-up">
-        <div className="inline-flex items-center justify-center w-28 h-28 rounded-full bg-red-500/20 border-4 border-red-400 mb-8">
-          <svg className="w-14 h-14 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </div>
-        <h1 className="text-4xl font-bold text-red-400 mb-4">
-          Payment Failed
-        </h1>
-        <p className="text-xl text-gray-300 mb-2">{message}</p>
-        <p className="text-gray-500 mb-8">Please try again</p>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onReset();
-          }}
-          className="inline-flex items-center gap-2 px-8 py-4 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-semibold transition-all"
-        >
-          <ArrowLeft className="w-5 h-5" />
-          Try Again
-        </button>
-      </div>
-    </div>
   );
 }
