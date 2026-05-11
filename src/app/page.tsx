@@ -1,30 +1,57 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { DollarSign, CreditCard, Shield, ArrowLeft, Loader2, Wifi, Settings } from "lucide-react";
+import { useState, useEffect } from "react";
+import { DollarSign, CreditCard, Shield, ArrowLeft } from "lucide-react";
 import PaymentFlow from "@/components/PaymentFlow";
-import Link from "next/link";
 
-type AppState = "select" | "waiting-for-tap" | "payment" | "success" | "error";
-type PaymentMode = "terminal" | "web";
+type AppState = "select" | "payment" | "success" | "error";
+
+function buildSquarePOSUrl(amountCents: number): string {
+  const appId = process.env.NEXT_PUBLIC_SQUARE_APPLICATION_ID!;
+  const callbackUrl = `${window.location.origin}/callback`;
+  const locationId = process.env.NEXT_PUBLIC_SQUARE_LOCATION_ID!;
+
+  const data = {
+    amount_money: {
+      amount: String(amountCents),
+      currency_code: "USD",
+    },
+    callback_url: callbackUrl,
+    client_id: appId,
+    version: "1.3",
+    notes: `MSA Payment - $${(amountCents / 100).toFixed(2)}`,
+    location_id: locationId,
+    options: {
+      supported_tender_types: ["CREDIT_CARD"],
+      auto_return: true,
+    },
+  };
+
+  const encoded = btoa(JSON.stringify(data));
+
+  const userAgent = navigator.userAgent.toLowerCase();
+  const isIOS = /iphone|ipad|ipod/.test(userAgent);
+  const isAndroid = /android/.test(userAgent);
+
+  if (isIOS) {
+    return `square-commerce-v1://payment/create?data=${encoded}`;
+  } else if (isAndroid) {
+    return `intent:#Intent;action=com.squareup.pos.action.CHARGE;package=com.squareup;S.browser_fallback_url=${encodeURIComponent(window.location.origin)};S.com.squareup.pos.WEB_CALLBACK_URI=${encodeURIComponent(callbackUrl)};S.com.squareup.pos.CLIENT_ID=${appId};S.com.squareup.pos.API_VERSION=v2.0;i.com.squareup.pos.TOTAL_AMOUNT=${amountCents};S.com.squareup.pos.CURRENCY_CODE=USD;S.com.squareup.pos.TENDER_TYPES=com.squareup.pos.TENDER_CARD;S.com.squareup.pos.NOTE=${encodeURIComponent(`MSA Payment - $${(amountCents / 100).toFixed(2)}`)};S.com.squareup.pos.LOCATION_ID=${locationId};end`;
+  }
+
+  return "";
+}
 
 export default function KioskPage() {
   const [state, setState] = useState<AppState>("select");
   const [selectedAmount, setSelectedAmount] = useState<number>(0);
   const [paymentResult, setPaymentResult] = useState<any>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
-  const [deviceId, setDeviceId] = useState<string>("");
-  const [paymentMode, setPaymentMode] = useState<PaymentMode>("terminal");
-  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const [isMobile, setIsMobile] = useState(false);
 
   useEffect(() => {
-    const saved = localStorage.getItem("msa-kiosk-device-id");
-    if (saved) {
-      setDeviceId(saved);
-      setPaymentMode("terminal");
-    } else {
-      setPaymentMode("web");
-    }
+    const ua = navigator.userAgent.toLowerCase();
+    setIsMobile(/iphone|ipad|ipod|android/.test(ua));
   }, []);
 
   useEffect(() => {
@@ -37,68 +64,26 @@ export default function KioskPage() {
     return () => clearTimeout(timer);
   }, [state]);
 
-  useEffect(() => {
-    return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current);
-    };
-  }, []);
-
   const resetToHome = () => {
-    if (pollingRef.current) {
-      clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
     setState("select");
     setSelectedAmount(0);
     setPaymentResult(null);
     setErrorMessage("");
   };
 
-  const handleAmountSelect = async (cents: number) => {
+  const handleAmountSelect = (cents: number) => {
     setSelectedAmount(cents);
 
-    if (paymentMode === "terminal" && deviceId) {
-      setState("waiting-for-tap");
-      try {
-        const res = await fetch("/api/terminal-checkout", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amountCents: cents, deviceId }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
-
-        const checkoutId = data.checkout.id;
-        pollCheckoutStatus(checkoutId);
-      } catch (err: any) {
-        setErrorMessage(err.message || "Failed to activate reader");
-        setState("error");
+    if (isMobile) {
+      const posUrl = buildSquarePOSUrl(cents);
+      if (posUrl) {
+        window.location.href = posUrl;
+        return;
       }
-    } else {
-      setState("payment");
     }
+
+    setState("payment");
   };
-
-  const pollCheckoutStatus = useCallback((checkoutId: string) => {
-    pollingRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/checkout-status?id=${checkoutId}`);
-        const data = await res.json();
-
-        if (data.status === "COMPLETED") {
-          if (pollingRef.current) clearInterval(pollingRef.current);
-          setPaymentResult(data);
-          setState("success");
-        } else if (data.status === "CANCELED" || data.status === "CANCEL_REQUESTED") {
-          if (pollingRef.current) clearInterval(pollingRef.current);
-          setErrorMessage(data.cancelReason || "Payment was canceled");
-          setState("error");
-        }
-      } catch (err) {
-        console.error("Polling error:", err);
-      }
-    }, 2000);
-  }, []);
 
   const handlePaymentSuccess = (result: any) => {
     setPaymentResult(result);
@@ -116,10 +101,6 @@ export default function KioskPage() {
 
   if (state === "error") {
     return <ErrorScreen message={errorMessage} onReset={resetToHome} />;
-  }
-
-  if (state === "waiting-for-tap") {
-    return <WaitingForTapScreen amount={selectedAmount} onCancel={resetToHome} />;
   }
 
   if (state === "payment") {
@@ -164,17 +145,17 @@ export default function KioskPage() {
         />
       </div>
 
-      {/* Status + Footer */}
+      {/* Footer */}
       <div className="flex flex-col items-center gap-3">
-        {paymentMode === "terminal" && deviceId ? (
+        {isMobile ? (
           <div className="flex items-center gap-2 text-emerald-400 text-sm">
-            <Wifi className="w-4 h-4" />
-            <span>Reader connected — tap amount, then tap card</span>
+            <CreditCard className="w-4 h-4" />
+            <span>Tap amount → opens reader → customer taps card</span>
           </div>
         ) : (
-          <div className="flex items-center gap-2 text-yellow-400 text-sm">
+          <div className="flex items-center gap-2 text-gray-400 text-sm">
             <CreditCard className="w-4 h-4" />
-            <span>No reader paired — using online card entry</span>
+            <span>Tap amount → enter card details online</span>
           </div>
         )}
         <div className="flex items-center gap-2 text-gray-600 text-sm">
@@ -182,57 +163,12 @@ export default function KioskPage() {
         </div>
       </div>
 
-      {/* Setup + Admin links */}
-      <Link
-        href="/setup"
-        className="fixed top-4 right-4 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-gray-500 hover:text-gray-300 transition-all"
-        title="Reader Setup"
-      >
-        <Settings className="w-5 h-5" />
-      </Link>
+      {/* Hidden admin link */}
       <a
         href="/admin"
         className="fixed bottom-4 right-4 w-8 h-8 opacity-0 hover:opacity-20 transition-opacity"
         aria-label="Admin"
       />
-    </div>
-  );
-}
-
-function WaitingForTapScreen({
-  amount,
-  onCancel,
-}: {
-  amount: number;
-  onCancel: () => void;
-}) {
-  return (
-    <div className="kiosk-mode min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-brand-950 via-gray-900 to-gray-950 p-6">
-      <div className="text-center">
-        <div className="pulse-glow inline-flex items-center justify-center w-32 h-32 rounded-full bg-brand-500/20 border-4 border-brand-400 mb-8">
-          <CreditCard className="w-16 h-16 text-brand-300" />
-        </div>
-        <h1 className="text-4xl font-bold text-white mb-4">
-          Tap Your Card
-        </h1>
-        <p className="text-2xl text-brand-300 mb-2 font-semibold">
-          ${(amount / 100).toFixed(2)}
-        </p>
-        <p className="text-gray-400 mb-8">
-          Hold your card near the reader
-        </p>
-        <div className="flex items-center justify-center gap-3 mb-12">
-          <Loader2 className="w-5 h-5 text-brand-400 animate-spin" />
-          <span className="text-gray-400">Waiting for card...</span>
-        </div>
-        <button
-          onClick={onCancel}
-          className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-white/10 hover:bg-white/20 text-gray-300 font-medium transition-all"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Cancel
-        </button>
-      </div>
     </div>
   );
 }
