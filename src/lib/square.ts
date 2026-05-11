@@ -13,5 +13,7 @@ export const squareClient = new Client({
 export const paymentsApi = squareClient.paymentsApi;
 export const ordersApi = squareClient.ordersApi;
 export const locationsApi = squareClient.locationsApi;
+export const terminalApi = squareClient.terminalApi;
+export const devicesApi = squareClient.devicesApi;
 
 export const LOCATION_ID = process.env.SQUARE_LOCATION_ID!;
